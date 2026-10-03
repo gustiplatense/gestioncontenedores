@@ -1,0 +1,10 @@
+{
+  "name": "Hassa · App de campo",
+  "short_name": "Hassa Campo",
+  "start_url": "/campo/",
+  "scope": "/campo/",
+  "display": "standalone",
+  "background_color": "#f3f5f4",
+  "theme_color": "#0f6b4a",
+  "icons": [{ "src": "/campo/icono.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
