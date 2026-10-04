@@ -1,7 +1,8 @@
 body { background: var(--fondo); }
 .movil { max-width: 520px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column; }
 .movil header { background: var(--verde); color: #fff; padding: 12px 16px; display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 5; }
-.movil header .logo { background: #fff; color: var(--verde); }
+.movil header.claro { background: #fff; color: var(--texto); border-bottom: 3px solid #3db620; }
+.movil header.claro button { background: #fff; color: var(--texto); border: 1px solid var(--borde); }
 .movil header button { margin-left: auto; background: #ffffff22; color: #fff; border: 0; border-radius: 8px; padding: 6px 10px; }
 .movil header .volver { margin: 0; font-size: 18px; }
 .cuerpo { padding: 16px; display: grid; gap: 14px; align-content: start; flex: 1; }

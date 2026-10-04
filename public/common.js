@@ -47,7 +47,7 @@ export async function requerirLogin(contenedor) {
   contenedor.innerHTML = `
     <div class="login">
       <div class="login-card">
-        <div class="marca grande"><span class="logo">H</span> Hassa · Inventario</div>
+        <img class="logo-img grande" src="/logo.png" alt="Hassa"><div class="marca grande">Inventario de contenedores</div>
         <p class="suave">Ingresá con tu cuenta de Google. El acceso lo habilita un administrador.</p>
         <div id="g-btn"></div>
         <div id="demo-btns"></div>

@@ -14,7 +14,7 @@ let mapa = null, capa = null, pagina = 0;
 raiz.innerHTML = `
   <div class="app">
     <header class="top">
-      <div class="marca"><span class="logo">H</span> Hassa · Inventario</div>
+      <div class="marca"><img class="logo-img" src="/logo.png" alt="Hassa"></div>
       <nav class="tabs">${Object.entries(VISTAS).map(([k, v]) => `<button data-vista="${k}">${v}</button>`).join('')}</nav>
       <div class="usuario">
         <span>${esc(yo.nombre)} · ${esc(ROLES[yo.rol])}</span>
