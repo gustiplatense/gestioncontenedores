@@ -95,7 +95,24 @@ td.largo { white-space: normal; min-width: 140px; }
 .linea { border-left: 2px solid var(--borde); padding: 0 0 12px 12px; font-size: 13.5px; }
 .linea img { max-width: 100%; border-radius: 8px; margin-top: 6px; }
 
+.check { display: flex; grid-template-columns: none; align-items: center; gap: 8px; font-size: 13.5px; color: var(--texto); cursor: pointer; }
+.check input { width: 16px; height: 16px; accent-color: var(--verde); }
+.en-linea { display: flex; align-items: center; gap: 6px; }
+.separador { width: 1px; align-self: stretch; background: var(--borde); margin: 0 4px; }
+.segmento { display: inline-flex; border: 1px solid var(--borde); border-radius: 10px; overflow: hidden; background: #fff; }
+.segmento button { border: 0; background: none; padding: 9px 12px; cursor: pointer; font-weight: 600; color: var(--suave); }
+.segmento button.activo { background: var(--verde); color: #fff; }
+.mapa-fila.reclamos { grid-template-columns: 1fr 380px; }
+#mapa.eligiendo, #mapa.eligiendo .leaflet-interactive { cursor: crosshair !important; }
+.recl { display: flex; gap: 10px; align-items: flex-start; padding: 10px 6px; border-bottom: 1px solid var(--borde); font-size: 13.5px; cursor: pointer; border-radius: 8px; }
+.recl:hover { background: #f4f8f6; }
+.recl.sel { background: #e8f0fc; }
+.recl input { width: 17px; height: 17px; margin-top: 2px; accent-color: #1f6fd6; flex: none; }
+.parada { width: 26px; height: 26px; border-radius: 50%; background: #1f6fd6; color: #fff; font-weight: 700; font-size: 12.5px; display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 1px 4px #0006; }
+.foto-recl { width: 100%; border-radius: 10px; margin-bottom: 8px; display: block; }
+
 @media (max-width: 800px) {
+  .mapa-fila.reclamos { grid-template-columns: 1fr; }
   .mapa-fila { grid-template-columns: 1fr; }
   header.top { gap: 8px; padding: 0 10px; overflow-x: auto; }
   .usuario span { display: none; }

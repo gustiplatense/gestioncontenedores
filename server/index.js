@@ -5,7 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { OAuth2Client } from 'google-auth-library';
-import { db, tx, distanciaM, DEPOSITO, FOTOS_DIR } from './db.js';
+import { db, tx, distanciaM, DEPOSITO, FOTOS_DIR, config, MOTIVOS_RECLAMO } from './db.js';
+import { enviarMail, cuerpoHtml, smtp } from './mail.js';
 import { seedSiVacio } from './seed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,9 +15,9 @@ const PORT = process.env.PORT || 3000;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').toLowerCase();
 const MODO_DEMO = !GOOGLE_CLIENT_ID;
-const HORAS_SIN_LECTURA = 48, DESVIO_MAX_M = 150;
+const HORAS_SIN_LECTURA = 48, DESVIO_MAX_M = 150, DIAS_PUNTO_VACIO = 7;
 
-if (seedSiVacio()) console.log('Base de datos creada con datos de ejemplo.');
+if (seedSiVacio()) console.log('Base de datos creada: inventario real + actividad simulada.');
 if (ADMIN_EMAIL) {
   db.prepare(`INSERT INTO usuarios (email,nombre,rol,activo) VALUES (?,?,'admin',1)
               ON CONFLICT(email) DO UPDATE SET rol='admin', activo=1`).run(ADMIN_EMAIL, ADMIN_EMAIL);
@@ -128,6 +129,8 @@ app.get('/api/resumen', auth(), (req, res) => {
     sinLectura: db.prepare("SELECT COUNT(*) n FROM contenedores WHERE estado='en_servicio' AND (ult_lectura_ts IS NULL OR ult_lectura_ts < ?)").get(corteSinLectura()).n,
     fueraDeUbicacion: db.prepare("SELECT COUNT(*) n FROM contenedores WHERE estado='en_servicio' AND ult_desvio_m > ?").get(DESVIO_MAX_M).n,
     lecturas24h: db.prepare('SELECT COUNT(*) n FROM lecturas WHERE ts > ?').get(new Date(Date.now() - 86400e3).toISOString()).n,
+    puntosVacios: puntosVacios().length,
+    reclamos: Object.fromEntries(db.prepare('SELECT estado, COUNT(*) n FROM reclamos GROUP BY estado').all().map(r => [r.estado, r.n])),
     reparacionesPendientes: db.prepare("SELECT COUNT(*) n FROM gestiones WHERE tipo='reparacion' AND estado='pendiente'").get().n,
   });
 });
@@ -156,7 +159,7 @@ app.get('/api/contenedores', auth(), (req, res) => {
 // Busca por id interno, número de inventario o tag id
 function buscarContenedor(ref) {
   const s = String(ref || '').trim();
-  return db.prepare(`SELECT c.*, t.nombre tipo, t.categoria, t.capacidad_l FROM contenedores c
+  return db.prepare(`SELECT c.*, t.nombre tipo, t.categoria FROM contenedores c
     JOIN tipos t ON t.id = c.tipo_id
     WHERE c.nro_inventario = ? COLLATE NOCASE OR c.tag_id = ? COLLATE NOCASE OR c.id = ?`)
     .get(s, s, /^\d+$/.test(s) ? Number(s) : -1);
@@ -174,12 +177,13 @@ app.get('/api/contenedores/:ref', auth(), (req, res) => {
   res.json(c);
 });
 
-// QR que se imprime en el contenedor: abre la app de campo directamente en ese contenedor
+// QR que se imprime en el contenedor: con la cámara del celular abre la app del vecino en ese equipo;
+// la app de campo lee el mismo QR desde su propio lector.
 app.get('/api/contenedores/:ref/qr.svg', auth(), async (req, res) => {
   const c = buscarContenedor(req.params.ref);
   if (!c) return res.status(404).end();
   const base = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
-  const svg = await QRCode.toString(`${base}/campo/?c=${c.nro_inventario}`, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
+  const svg = await QRCode.toString(`${base}/vecino/?c=${c.nro_inventario}`, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
   res.type('image/svg+xml').send(svg);
 });
 
@@ -217,18 +221,25 @@ app.post('/api/gestiones', auth('admin', 'operador'), (req, res) => {
   const ts = new Date().toISOString();
   const id = tx(() => {
     const upd = (sql, ...p) => db.prepare(sql).run(...p);
-    if (b.tipo === 'baja') upd("UPDATE contenedores SET estado='baja' WHERE id=?", c.id);
+    if (b.tipo === 'baja') upd("UPDATE contenedores SET estado='baja', punto_id=NULL WHERE id=?", c.id);
     if (b.tipo === 'reparacion') upd("UPDATE contenedores SET estado='reparacion' WHERE id=?", c.id);
     if (b.tipo === 'movimiento') {
-      upd("UPDATE contenedores SET lat=?, lng=?, direccion=COALESCE(?,direccion), estado='en_servicio', ult_desvio_m=NULL WHERE id=?",
-        lat, lng, b.direccion || null, c.id);
+      // Deja libre su punto anterior; si la nueva posición coincide con un punto vacío, lo ocupa.
+      const libre = db.prepare(`SELECT p.id, p.lat, p.lng, p.calle, p.altura, p.barrio FROM puntos p
+        LEFT JOIN contenedores o ON o.punto_id = p.id AND o.id != ?
+        WHERE o.id IS NULL AND p.lat BETWEEN ? AND ? AND p.lng BETWEEN ? AND ?`).all(c.id, lat - 0.0004, lat + 0.0004, lng - 0.0004, lng + 0.0004)
+        .map(p => ({ ...p, d: distanciaM(lat, lng, p.lat, p.lng) })).filter(p => p.d <= 30).sort((x, y) => x.d - y.d)[0];
+      upd(`UPDATE contenedores SET lat=?, lng=?, direccion=COALESCE(?,direccion), calle=?, altura=?, barrio=COALESCE(?,barrio),
+           punto_id=?, estado='en_servicio', ult_desvio_m=NULL WHERE id=?`,
+        lat, lng, b.direccion || null, libre ? libre.calle : (b.direccion || c.calle), libre ? libre.altura : (b.direccion ? null : c.altura),
+        libre ? libre.barrio : null, libre ? libre.id : null, c.id);
     }
     if (b.tipo === 'recambio') {
       // El nuevo ocupa el lugar del viejo; el viejo vuelve al depósito.
-      upd("UPDATE contenedores SET estado='en_servicio', lat=?, lng=?, direccion=?, barrio=?, ult_desvio_m=NULL WHERE id=?",
-        c.lat, c.lng, c.direccion, c.barrio, nuevo.id);
-      upd("UPDATE contenedores SET estado='en_deposito', lat=?, lng=?, direccion=?, barrio=?, ult_desvio_m=NULL WHERE id=?",
+      upd("UPDATE contenedores SET estado='en_deposito', punto_id=NULL, lat=?, lng=?, direccion=?, calle=NULL, altura=NULL, barrio=?, ult_desvio_m=NULL WHERE id=?",
         DEPOSITO.lat, DEPOSITO.lng, DEPOSITO.direccion, DEPOSITO.barrio, c.id);
+      upd("UPDATE contenedores SET estado='en_servicio', punto_id=?, lat=?, lng=?, direccion=?, calle=?, altura=?, barrio=?, ult_desvio_m=NULL WHERE id=?",
+        c.punto_id, c.lat, c.lng, c.direccion, c.calle, c.altura, c.barrio, nuevo.id);
     }
     return db.prepare(`INSERT INTO gestiones
       (contenedor_id,tipo,estado,motivo,observaciones,lat,lng,foto,reemplazo_id,usuario_email,ts)
@@ -257,6 +268,165 @@ app.post('/api/gestiones/:id/resolver', auth('admin'), (req, res) => {
     db.prepare("UPDATE contenedores SET estado='en_servicio' WHERE id=? AND estado='reparacion'").run(g.contenedor_id);
   });
   res.json({ ok: true });
+});
+
+
+// ---------- Puntos vacíos y mapa de calor ----------
+// Punto vacío: no tiene un equipo colocado (fue retirado y no se repuso) o el que tiene no registra lecturas hace mucho.
+function puntosVacios() {
+  const corte = new Date(Date.now() - DIAS_PUNTO_VACIO * 86400e3).toISOString();
+  return db.prepare(`SELECT p.id, p.lat, p.lng, p.calle, p.altura, p.barrio, t.nombre tipo, c.id contenedor_id, c.ult_lectura_ts
+    FROM puntos p JOIN tipos t ON t.id = p.tipo_id
+    LEFT JOIN contenedores c ON c.punto_id = p.id AND c.estado IN ('en_servicio','reparacion')
+    WHERE c.id IS NULL OR (c.estado = 'en_servicio' AND (c.ult_lectura_ts IS NULL OR c.ult_lectura_ts < ?))`).all(corte)
+    .map(p => ({
+      punto_id: p.id, lat: p.lat, lng: p.lng, direccion: `${p.calle} ${p.altura}`, barrio: p.barrio, tipo: p.tipo,
+      motivo: p.contenedor_id ? 'sin_lecturas' : 'retirado', contenedor_id: p.contenedor_id,
+      dias: p.ult_lectura_ts ? Math.floor((Date.now() - new Date(p.ult_lectura_ts)) / 86400e3) : null,
+    }));
+}
+app.get('/api/puntos-vacios', auth(), (req, res) => res.json(puntosVacios()));
+
+// Cantidad de lecturas por celda de ~100 m en los últimos días: [lat, lng, cantidad]
+app.get('/api/lecturas/calor', auth(), (req, res) => {
+  const dias = Math.min(Number(req.query.dias) || 7, 90);
+  res.json(db.prepare(`SELECT ROUND(lat, 3) la, ROUND(lng, 3) ln, COUNT(*) n FROM lecturas WHERE ts > ? GROUP BY la, ln`)
+    .all(new Date(Date.now() - dias * 86400e3).toISOString()).map(r => [r.la, r.ln, r.n]));
+});
+
+// ---------- Reclamos de vecinos / empresas ----------
+const SEL_RECLAMO = `SELECT r.*, c.nro_inventario, c.lat c_lat, c.lng c_lng, c.direccion c_direccion, t.nombre tipo_contenedor, u.nombre operario
+  FROM reclamos r JOIN contenedores c ON c.id = r.contenedor_id JOIN tipos t ON t.id = c.tipo_id
+  LEFT JOIN usuarios u ON u.email = r.operario_email`;
+const aReclamo = (r) => r && ({ ...r, fotos: JSON.parse(r.fotos || '[]') });
+const baseUrl = (req) => process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+const emailValido = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e);
+const adjuntosDe = (archivos) => archivos.map((f, i) => ({ filename: `foto-${i + 1}${path.extname(f)}`, path: path.join(FOTOS_DIR, f) }));
+
+// Público (sin login): datos mínimos del equipo para confirmar que el QR es correcto
+app.get('/api/publico/contenedor/:ref', (req, res) => {
+  const c = buscarContenedor(req.params.ref);
+  if (!c) return res.status(404).json({ error: 'No encontramos un equipo con ese código' });
+  res.json({ nro_inventario: c.nro_inventario, tipo: c.tipo, calle: c.calle, altura: c.altura, barrio: c.barrio, motivos: MOTIVOS_RECLAMO });
+});
+
+// Límite simple contra abuso: 10 reclamos por hora por dirección IP
+const cargasPorIp = new Map();
+function limite(req, res, next) {
+  const ahora = Date.now(), lista = (cargasPorIp.get(req.ip) || []).filter(t => ahora - t < 3600e3);
+  if (lista.length >= 10) return res.status(429).json({ error: 'Demasiados reclamos desde este dispositivo. Probá más tarde.' });
+  lista.push(ahora); cargasPorIp.set(req.ip, lista); next();
+}
+
+app.post('/api/publico/reclamos', limite, async (req, res) => {
+  const b = req.body || {};
+  const c = buscarContenedor(b.contenedor);
+  if (!c) return res.status(404).json({ error: 'No encontramos un equipo con ese código' });
+  if (!MOTIVOS_RECLAMO.includes(b.motivo)) return res.status(400).json({ error: 'Elegí un motivo' });
+  const nombre = String(b.nombre || '').trim().slice(0, 120), email = String(b.email || '').trim().toLowerCase();
+  if (!nombre) return res.status(400).json({ error: 'Ingresá tu nombre' });
+  if (!emailValido(email)) return res.status(400).json({ error: 'Ingresá un mail válido' });
+  const fotos = (Array.isArray(b.fotos) ? b.fotos : []).slice(0, 3).map(guardarFoto).filter(Boolean);
+  if (!fotos.length) return res.status(400).json({ error: 'Adjuntá al menos una foto' });
+  const txt = (v, n) => String(v || '').trim().slice(0, n) || null;
+  const ts = new Date().toISOString();
+  const id = Number(db.prepare(`INSERT INTO reclamos
+    (contenedor_id,motivo,observaciones,fotos,lat,lng,calle,altura,barrio,nombre,email,estado,ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,'pendiente',?)`)
+    .run(c.id, b.motivo, txt(b.observaciones, 1000), JSON.stringify(fotos), num(b.lat), num(b.lng),
+      txt(b.calle, 120), txt(b.altura, 20), txt(b.barrio, 80), nombre, email, ts).lastInsertRowid);
+
+  const filas = [
+    ['Reclamo', `#${id}`], ['Motivo', b.motivo], ['Equipo', `${c.nro_inventario} · ${c.tipo}`],
+    ['Dirección', [txt(b.calle, 120), txt(b.altura, 20)].filter(Boolean).join(' ')], ['Barrio', txt(b.barrio, 80)],
+    ['GPS', num(b.lat) !== null ? `${num(b.lat).toFixed(5)}, ${num(b.lng).toFixed(5)}` : 'Sin ubicación'],
+    ['Observaciones', txt(b.observaciones, 1000)], ['Cargado por', `${nombre} <${email}>`],
+    ['Fecha', new Date(ts).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })],
+  ];
+  // Se espera el envío antes de responder para que el mail salga aunque la plataforma pause el proceso.
+  await Promise.all([
+    enviarMail({
+      para: config.get('empresa_email'), reclamoId: id, responderA: email, adjuntos: adjuntosDe(fotos),
+      asunto: `Nuevo reclamo #${id} · ${b.motivo} · Equipo ${c.nro_inventario}`,
+      html: cuerpoHtml(`Nuevo reclamo #${id}`, filas, `<p><a href="${baseUrl(req)}/">Abrir el backoffice</a></p>`),
+    }),
+    enviarMail({
+      para: email, reclamoId: id, asunto: `Recibimos tu reclamo #${id}`,
+      html: cuerpoHtml('Recibimos tu reclamo', filas.slice(0, 7), '<p>Te vamos a avisar por este medio cuando esté resuelto. Gracias por colaborar.</p>'),
+    }),
+  ]);
+  res.status(201).json({ id });
+});
+
+app.get('/api/operarios', auth(), (req, res) => {
+  res.json(db.prepare("SELECT email, nombre FROM usuarios WHERE rol = 'operador' AND activo = 1 ORDER BY nombre").all());
+});
+
+app.get('/api/reclamos', auth(), (req, res) => {
+  const w = [], p = [];
+  if (req.query.estado) { w.push('r.estado = ?'); p.push(req.query.estado); }
+  if (req.query.operario) { w.push('r.operario_email = ?'); p.push(req.query.operario); }
+  if (req.query.mios) { w.push("r.operario_email = ? AND r.estado = 'programado'"); p.push(req.usuario.email); }
+  res.json(db.prepare(`${SEL_RECLAMO} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY r.ts DESC LIMIT 500`).all(...p).map(aReclamo));
+});
+
+app.get('/api/reclamos/:id', auth(), (req, res) => {
+  const r = aReclamo(db.prepare(`${SEL_RECLAMO} WHERE r.id = ?`).get(Number(req.params.id)));
+  if (!r) return res.status(404).json({ error: 'Reclamo no encontrado' });
+  r.mails = db.prepare('SELECT para, asunto, estado, error, ts FROM mails WHERE reclamo_id = ? ORDER BY id').all(r.id);
+  res.json(r);
+});
+
+// Programación: asigna reclamos pendientes a un operario (o los devuelve a pendientes si operario es vacío)
+app.post('/api/reclamos/asignar', auth('admin'), (req, res) => {
+  const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(Number.isInteger);
+  const operario = req.body.operario || null;
+  if (!ids.length) return res.status(400).json({ error: 'No hay reclamos seleccionados' });
+  if (operario && !db.prepare("SELECT 1 FROM usuarios WHERE email = ? AND rol = 'operador' AND activo = 1").get(operario)) {
+    return res.status(400).json({ error: 'Operario inválido' });
+  }
+  const upd = db.prepare(`UPDATE reclamos SET operario_email = ?, estado = ?, programado_ts = ? WHERE id = ? AND estado != 'resuelto'`);
+  const ts = new Date().toISOString();
+  const n = tx(() => ids.reduce((a, id) => a + upd.run(operario, operario ? 'programado' : 'pendiente', operario ? ts : null, id).changes, 0));
+  res.json({ asignados: n });
+});
+
+// Resolución: la puede cargar un administrador o el operario que tiene asignado el reclamo. Avisa por mail.
+app.post('/api/reclamos/:id/resolver', auth('admin', 'operador'), async (req, res) => {
+  const r = aReclamo(db.prepare(`${SEL_RECLAMO} WHERE r.id = ?`).get(Number(req.params.id)));
+  if (!r) return res.status(404).json({ error: 'Reclamo no encontrado' });
+  if (r.estado === 'resuelto') return res.status(409).json({ error: 'El reclamo ya está resuelto' });
+  if (req.usuario.rol === 'operador' && r.operario_email !== req.usuario.email) return res.status(403).json({ error: 'Este reclamo no está asignado a tu usuario' });
+  const resolucion = String(req.body.resolucion || '').trim().slice(0, 1000);
+  if (!resolucion) return res.status(400).json({ error: 'Escribí la resolución' });
+  const foto = guardarFoto(req.body.foto);
+  const ts = new Date().toISOString();
+  db.prepare("UPDATE reclamos SET estado='resuelto', resolucion=?, foto_resolucion=?, resuelto_por=?, resuelto_ts=? WHERE id=?")
+    .run(resolucion, foto, req.usuario.email, ts, r.id);
+  const mail = await enviarMail({
+    para: [r.email, config.get('empresa_email')], reclamoId: r.id, adjuntos: foto ? adjuntosDe([foto]) : [],
+    asunto: `Reclamo #${r.id} resuelto · Equipo ${r.nro_inventario}`,
+    html: cuerpoHtml(`Reclamo #${r.id} resuelto`, [
+      ['Motivo', r.motivo], ['Equipo', `${r.nro_inventario} · ${r.tipo_contenedor}`],
+      ['Dirección', [r.calle, r.altura].filter(Boolean).join(' ')], ['Resolución', resolucion], ['Resuelto por', req.usuario.nombre],
+      ['Fecha', new Date(ts).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })],
+    ], '<p>Gracias por ayudarnos a mantener la ciudad limpia.</p>'),
+  });
+  res.json({ ok: true, mail });
+});
+
+// ---------- Ajustes del sistema ----------
+app.get('/api/ajustes', auth('admin'), (req, res) => res.json({ empresa_email: config.get('empresa_email') || '', smtp }));
+app.post('/api/ajustes', auth('admin'), (req, res) => {
+  const email = String(req.body.empresa_email || '').trim().toLowerCase();
+  if (email && !emailValido(email)) return res.status(400).json({ error: 'Email inválido' });
+  config.set('empresa_email', email);
+  res.json({ ok: true });
+});
+app.post('/api/ajustes/probar-mail', auth('admin'), async (req, res) => {
+  res.json(await enviarMail({
+    para: config.get('empresa_email'), asunto: 'Prueba de envío · Hassa Inventario',
+    html: cuerpoHtml('Prueba de envío', [['Resultado', 'El envío de mails funciona correctamente.'], ['Pedido por', req.usuario.email]]),
+  }));
 });
 
 // ---------- Usuarios (administración de accesos) ----------
@@ -319,6 +489,7 @@ app.get('/api/v1/tags', authApiKey, (req, res) => {
 app.use('/fotos', auth(), express.static(FOTOS_DIR));
 app.use('/vendor/leaflet', express.static(path.join(ROOT, 'node_modules/leaflet/dist')));
 app.use('/vendor/markercluster', express.static(path.join(ROOT, 'node_modules/leaflet.markercluster/dist')));
+app.use('/vendor/leaflet-heat', express.static(path.join(ROOT, 'node_modules/leaflet.heat/dist')));
 app.use('/vendor/html5-qrcode', express.static(path.join(ROOT, 'node_modules/html5-qrcode')));
 app.use(express.static(path.join(ROOT, 'public')));
 

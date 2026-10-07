@@ -12,6 +12,11 @@ export const ALERTAS = {
 export const GESTIONES = {
   movimiento: 'Movimiento', recambio: 'Recambio', reparacion: 'Solicitud de reparación', baja: 'Baja',
 };
+export const RECLAMOS = {
+  pendiente: { nombre: 'Pendiente', color: '#e08a00' },
+  programado: { nombre: 'Programado', color: '#1f6fd6' },
+  resuelto: { nombre: 'Resuelto', color: '#1a9d5f' },
+};
 export const ROLES = { admin: 'Administrador', operador: 'Operador', consulta: 'Consulta' };
 
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -71,7 +76,7 @@ export async function requerirLogin(contenedor) {
     document.head.appendChild(s);
   } else {
     $('#demo-btns', contenedor).innerHTML = `<p class="aviso">Modo demo: el login con Google se activa al configurar <code>GOOGLE_CLIENT_ID</code>.</p>` +
-      cfg.usuariosDemo.map((u) => `<button class="btn ancho" data-email="${esc(u.email)}">Entrar como ${esc(ROLES[u.rol])}</button>`).join('');
+      cfg.usuariosDemo.map((u) => `<button class="btn ancho" data-email="${esc(u.email)}">Entrar como ${esc(u.nombre.replace(' (demo)', ''))}</button>`).join('');
     $('#demo-btns', contenedor).onclick = async (ev) => {
       const b = ev.target.closest('button'); if (!b) return;
       try { await api('/api/auth/demo', { body: { email: b.dataset.email } }); location.reload(); }
@@ -82,3 +87,15 @@ export async function requerirLogin(contenedor) {
 }
 
 export async function salir() { await api('/api/auth/salir', { method: 'POST' }); location.reload(); }
+
+// Extrae el código de equipo de lo que contiene un QR: una URL (…?c=516, …?id=516 o …/516) o el código solo.
+export function codigoDe(texto) {
+  const t = String(texto || '').trim();
+  try {
+    const u = new URL(t);
+    for (const k of ['c', 'id', 'equipo', 'id_equipo', 'codigo']) { const v = u.searchParams.get(k); if (v) return v.trim(); }
+    const ult = u.pathname.split('/').filter(Boolean).pop();
+    if (ult) return decodeURIComponent(ult);
+  } catch { /* no es una URL */ }
+  return t;
+}

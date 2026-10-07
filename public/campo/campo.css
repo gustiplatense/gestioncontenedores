@@ -27,3 +27,6 @@ form.gestion textarea { min-height: 80px; resize: vertical; }
 .ok-pantalla .tilde { width: 72px; height: 72px; border-radius: 50%; background: var(--verde); color: #fff; font-size: 40px; display: grid; place-items: center; margin: 0 auto 14px; }
 .item { display: flex; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--borde); font-size: 14px; }
 .item:last-child { border: 0; }
+#mapa-ruta { height: 46vh; min-height: 280px; border-radius: 14px; border: 1px solid var(--borde); background: #e8ecea; }
+.fotos-vista { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.fotos-vista img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 10px; margin: 0; }

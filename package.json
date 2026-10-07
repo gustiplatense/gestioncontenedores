@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Demo: inventario de contenedores Hassa (backend + backoffice + app de campo)",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node server/index.js",
     "reset": "node scripts/reset.js",
@@ -15,7 +17,9 @@
     "google-auth-library": "^9.15.0",
     "html5-qrcode": "^2.3.8",
     "leaflet": "^1.9.4",
+    "leaflet.heat": "^0.2.0",
     "leaflet.markercluster": "^1.5.3",
+    "nodemailer": "^10.0.15",
     "qrcode": "^1.5.4"
   }
 }

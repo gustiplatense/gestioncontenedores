@@ -1,4 +1,6 @@
-import { api, esc, $, GESTIONES, haceCuanto, fecha, chipEstado, requerirLogin, salir } from '/common.js';
+import { api, esc, $, GESTIONES, haceCuanto, fecha, chipEstado, requerirLogin, salir, codigoDe } from '/common.js';
+import { estampar, reducirFoto } from '/fotos.js';
+import { calcularRuta, dibujarRuta, resumenRuta } from '/ruta.js';
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/campo/sw.js').catch(() => {});
 
@@ -33,11 +35,6 @@ function marco(titulo, cuerpo, volver) {
   window.scrollTo(0, 0);
 }
 
-// El QR impreso contiene una URL del tipo https://.../campo/?c=HAS-000123 (también se acepta el código solo)
-function codigoDe(texto) {
-  try { const c = new URL(texto).searchParams.get('c'); if (c) return c; } catch { /* no es URL */ }
-  return texto.trim();
-}
 async function pararLector() {
   if (!lector) return;
   try { await lector.stop(); } catch { /* ya estaba detenido */ }
@@ -59,19 +56,113 @@ async function inicio(mensaje) {
   marco('Hassa · Campo', `
     <button class="btn grande" id="escanear">Escanear QR del contenedor</button>
     <form class="tarjeta" id="buscar">
-      <label>O ingresá el número de inventario
-        <span class="fila"><input name="c" placeholder="HAS-000123" autocapitalize="characters" required><button class="btn">Buscar</button></span>
+      <label>O ingresá el ID del equipo
+        <span class="fila"><input name="c" placeholder="Ej.: 516" inputmode="numeric" required><button class="btn">Buscar</button></span>
       </label>
       <p class="error" id="err">${esc(mensaje || '')}</p>
     </form>
+    <div class="tarjeta" id="relev"><b>Relevamientos asignados</b><p class="suave" style="margin:6px 0 0">Cargando…</p></div>
     <div class="tarjeta"><b>Mis últimas gestiones</b><div id="mias"><p class="suave">Cargando…</p></div></div>
     <p class="suave" style="text-align:center;font-size:13px">${esc(yo.nombre)} · <a href="/">Ir al backoffice</a></p>`);
   $('#escanear').onclick = () => escanear('Escanear contenedor', abrir, inicio);
   $('#buscar').onsubmit = (e) => { e.preventDefault(); abrir(new FormData(e.target).get('c')); };
+  api('/api/reclamos?mios=1').then((rs) => {
+    const caja = $('#relev'); if (!caja) return;
+    caja.innerHTML = `<b>Relevamientos asignados</b>` + (rs.length
+      ? `<p class="suave" style="margin:6px 0 10px">Tenés ${rs.length} ${rs.length === 1 ? 'reclamo' : 'reclamos'} para relevar.</p><button class="btn ancho" id="ver-ruta">Ver recorrido en el mapa</button>`
+      : '<p class="suave" style="margin:6px 0 0">No tenés relevamientos pendientes.</p>');
+    if (rs.length) $('#ver-ruta').onclick = () => recorrido();
+  }).catch(() => {});
   const mias = await api('/api/gestiones?mias=1&limit=8');
   const caja = $('#mias'); if (!caja) return;
   caja.innerHTML = mias.map((g) => `<div class="item"><span><b>${esc(GESTIONES[g.tipo])}</b> · ${esc(g.nro_inventario)}</span><span class="suave">${haceCuanto(g.ts)}</span></div>`).join('')
     || '<p class="suave">Todavía no registraste gestiones.</p>';
+}
+
+// ---------------- Relevamientos asignados y recorrido ----------------
+const posicion = (ms = 6000) => new Promise((ok) => {
+  if (!navigator.geolocation) return ok(null);
+  navigator.geolocation.getCurrentPosition((p) => ok({ lat: p.coords.latitude, lng: p.coords.longitude, precision: Math.round(p.coords.accuracy) }),
+    () => ok(null), { enableHighAccuracy: true, timeout: ms });
+});
+let mapaRuta = null;
+
+async function recorrido() {
+  marco('Mis relevamientos', `
+    <div id="mapa-ruta"></div>
+    <p class="suave" id="ruta-info" style="margin:0">Calculando el recorrido óptimo…</p>
+    <div class="tarjeta" id="ruta-lista" style="padding:6px 14px"></div>`, () => { if (mapaRuta) { mapaRuta.remove(); mapaRuta = null; } inicio(); });
+  const [rs, yoEstoy] = await Promise.all([api('/api/reclamos?mios=1'), posicion()]);
+  if (!$('#mapa-ruta')) return;
+  if (!rs.length) { $('#ruta-info').textContent = 'No tenés relevamientos pendientes.'; return; }
+  const ruta = await calcularRuta(rs.map((r) => ({ lat: r.c_lat, lng: r.c_lng })), yoEstoy);
+  if (!$('#mapa-ruta')) return;
+  const enOrden = ruta.orden.map((i) => rs[i]);
+  if (mapaRuta) mapaRuta.remove();
+  mapaRuta = L.map('mapa-ruta');
+  // El encuadre va antes de dibujar: Leaflet necesita una vista definida para agregar capas
+  mapaRuta.fitBounds(L.latLngBounds([...enOrden.map((r) => [r.c_lat, r.c_lng]), ...(yoEstoy ? [[yoEstoy.lat, yoEstoy.lng]] : [])]).pad(0.12));
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(mapaRuta);
+  dibujarRuta(mapaRuta, enOrden.map((r) => ({ lat: r.c_lat, lng: r.c_lng, titulo: `#${r.id} · ${r.motivo}` })), ruta, (_, i) => relevamiento(enOrden[i]));
+  if (yoEstoy) L.circleMarker([yoEstoy.lat, yoEstoy.lng], { radius: 8, color: '#fff', weight: 3, fillColor: '#111827', fillOpacity: 1 }).addTo(mapaRuta).bindTooltip('Tu posición');
+  $('#ruta-info').textContent = `${enOrden.length} paradas · ${resumenRuta(ruta)}${yoEstoy ? '' : ' · sin GPS: empieza por la parada más al norte'}`;
+  $('#ruta-lista').innerHTML = enOrden.map((r, i) => `
+    <div class="item" data-i="${i}" style="cursor:pointer"><span><span class="parada" style="display:inline-grid;margin-right:8px">${i + 1}</span><b>${esc(r.motivo)}</b> · Equipo ${esc(r.nro_inventario)}
+      <div class="suave" style="margin-left:34px">${esc(r.c_direccion)} · ${esc(r.tipo_contenedor)}</div></span><span class="suave">›</span></div>`).join('');
+  $('#ruta-lista').onclick = (e) => { const it = e.target.closest('[data-i]'); if (it) relevamiento(enOrden[Number(it.dataset.i)]); };
+}
+
+function relevamiento(r) {
+  if (mapaRuta) { mapaRuta.remove(); mapaRuta = null; }
+  const datos = { original: null, foto: null, ts: null, gps: null };
+  marco(`Reclamo #${r.id}`, `
+    <div class="tarjeta">
+      <b style="font-size:17px">${esc(r.motivo)}</b>
+      <div class="suave">Equipo ${esc(r.nro_inventario)} · ${esc(r.tipo_contenedor)}</div>
+      <dl class="datos" style="margin-bottom:0">
+        <dt>Dirección</dt><dd>${esc(r.c_direccion)}${r.barrio ? ', ' + esc(r.barrio) : ''}</dd>
+        <dt>Observaciones</dt><dd>${esc(r.observaciones) || '—'}</dd>
+        <dt>Cargado</dt><dd>${fecha(r.ts)} · ${esc(r.nombre)}</dd>
+      </dl>
+      ${r.fotos.map((f) => `<img src="/fotos/${esc(f)}" alt="Foto del reclamo" style="width:100%;border-radius:10px;margin-top:10px">`).join('')}
+    </div>
+    <button class="btn sec ancho" id="ir-equipo" style="margin:0">Abrir equipo (registrar gestión)</button>
+    <form class="gestion tarjeta" id="f-relev">
+      <b>Resolver el reclamo</b>
+      <label>Qué se hizo<textarea name="resolucion" required placeholder="Ej.: se colocó la tapa faltante"></textarea></label>
+      <label class="foto-btn"><span id="foto-vista">Tomar foto de cómo quedó</span><input type="file" accept="image/*" capture="environment" id="foto"></label>
+      <p class="error" id="err"></p>
+      <button class="btn grande">Marcar como resuelto</button>
+    </form>`, recorrido);
+  $('#ir-equipo').onclick = () => abrir(r.nro_inventario);
+  posicion(15000).then((p) => { datos.gps = p; marcar(); });
+  const marcar = async () => {
+    if (!datos.original) return;
+    datos.foto = await estampar(datos.original, [
+      `${datos.ts.toLocaleDateString('es-AR', { day: 'numeric', month: 'short', year: 'numeric' })} ${datos.ts.toLocaleTimeString('es-AR', { hour12: false })}`,
+      [r.c_direccion, r.barrio].filter(Boolean).join(', '),
+      datos.gps ? `GPS ${datos.gps.lat.toFixed(5)}, ${datos.gps.lng.toFixed(5)} (±${datos.gps.precision} m)` : 'Sin ubicación GPS',
+      `Equipo ${r.nro_inventario} · ${r.tipo_contenedor}`,
+      `Reclamo #${r.id} resuelto · ${yo.email}`,
+    ]);
+    const v = $('#foto-vista'); if (v) v.innerHTML = `<img src="${datos.foto}" alt="Foto tomada">Cambiar foto`;
+  };
+  $('#foto').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try { datos.original = await reducirFoto(f); datos.ts = new Date(); await marcar(); } catch { $('#err').textContent = 'No se pudo leer la foto.'; }
+  };
+  $('#f-relev').onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = e.target.querySelector('button.grande'); btn.disabled = true; $('#err').textContent = '';
+    try {
+      const res = await api(`/api/reclamos/${r.id}/resolver`, { body: { resolucion: new FormData(e.target).get('resolucion'), foto: datos.foto } });
+      marco('Reclamo resuelto', `
+        <div class="tarjeta ok-pantalla"><div class="tilde">✓</div><h2>Reclamo #${r.id} resuelto</h2>
+          <p class="suave">${res.mail.ok ? 'Se envió el mail de aviso.' : 'Quedó resuelto, pero el mail de aviso no se pudo enviar.'}</p></div>
+        <button class="btn grande" id="seguir">Seguir con el recorrido</button>`);
+      $('#seguir').onclick = () => recorrido();
+    } catch (err) { $('#err').textContent = err.message; btn.disabled = false; }
+  };
 }
 
 // ---------------- Contenedor ----------------
@@ -81,7 +172,7 @@ async function abrir(ref) {
   catch (e) { return inicio(e.status === 404 ? `No existe el contenedor "${ref}".` : e.message); }
   const enCalle = c.estado === 'en_servicio' || c.estado === 'reparacion';
   const hab = { movimiento: c.estado !== 'baja', recambio: enCalle, reparacion: c.estado === 'en_servicio', baja: c.estado !== 'baja' };
-  marco(c.nro_inventario, `
+  marco(`Equipo ${c.nro_inventario}`, `
     <div class="tarjeta">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:start">
         <div><b style="font-size:17px">${esc(c.tipo)}</b><div class="suave">${esc(c.direccion)}${c.barrio ? ', ' + esc(c.barrio) : ''}</div></div>
@@ -101,64 +192,13 @@ async function abrir(ref) {
 }
 
 // ---------------- Formulario de gestión ----------------
-// Marca de agua: escribe los datos de la gestión sobre la foto (abajo a la derecha), para que
-// la imagen conserve fecha, lugar, contenedor y usuario aunque circule fuera del sistema.
-function estampar(dataUrl, lineas) {
-  return new Promise((ok, mal) => {
-    const img = new Image();
-    img.onload = () => {
-      const cv = document.createElement('canvas');
-      cv.width = img.width; cv.height = img.height;
-      const g = cv.getContext('2d');
-      g.drawImage(img, 0, 0);
-      const margen = Math.round(cv.width * 0.025);
-      let tam = Math.round(Math.max(cv.width, cv.height) / 36);
-      const fuente = () => { g.font = `500 ${tam}px system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif`; };
-      fuente();
-      // Si alguna línea no entra en el ancho, se achica la letra
-      const ancho = Math.max(...lineas.map((l) => g.measureText(l).width));
-      if (ancho > cv.width - 2 * margen) { tam = Math.floor(tam * (cv.width - 2 * margen) / ancho); fuente(); }
-      const alto = Math.round(tam * 1.25);
-      g.textAlign = 'right'; g.textBaseline = 'alphabetic'; g.lineJoin = 'round';
-      const base = cv.height - margen - (lineas.length - 1) * alto;
-      const sombra = g.createLinearGradient(0, base - alto * 2, 0, cv.height);
-      sombra.addColorStop(0, 'rgba(0,0,0,0)'); sombra.addColorStop(1, 'rgba(0,0,0,0.55)');
-      g.fillStyle = sombra; g.fillRect(0, base - alto * 2, cv.width, cv.height - base + alto * 2);
-      lineas.forEach((l, i) => {
-        const y = base + i * alto;
-        g.lineWidth = Math.max(2, tam / 7); g.strokeStyle = 'rgba(0,0,0,0.75)'; g.strokeText(l, cv.width - margen, y);
-        g.fillStyle = '#fff'; g.fillText(l, cv.width - margen, y);
-      });
-      ok(cv.toDataURL('image/jpeg', 0.85));
-    };
-    img.onerror = mal;
-    img.src = dataUrl;
-  });
-}
-
-function reducirFoto(archivo, max = 1600) {
-  return new Promise((ok, mal) => {
-    const img = new Image();
-    img.onload = () => {
-      const k = Math.min(1, max / Math.max(img.width, img.height));
-      const cv = document.createElement('canvas');
-      cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
-      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-      URL.revokeObjectURL(img.src);
-      ok(cv.toDataURL('image/jpeg', 0.92));
-    };
-    img.onerror = mal;
-    img.src = URL.createObjectURL(archivo);
-  });
-}
-
 function formulario(c, tipo, previo = {}) {
   const datos = { foto: null, fotoOriginal: null, fotoTs: null, precision: null, lat: null, lng: null, reemplazo: '', observaciones: '', motivo: '', ...previo };
   const motivos = MOTIVOS[tipo];
   marco(`${GESTIONES[tipo]} · ${c.nro_inventario}`, `
     <form class="gestion">
       ${tipo === 'recambio' ? `<label>Contenedor nuevo (debe estar en depósito)
-        <span class="fila"><input name="reemplazo" placeholder="HAS-000456" value="${esc(datos.reemplazo)}" required><button type="button" class="btn sec" id="esc-reemplazo">Escanear</button></span></label>` : ''}
+        <span class="fila"><input name="reemplazo" placeholder="ID del equipo nuevo" value="${esc(datos.reemplazo)}" required><button type="button" class="btn sec" id="esc-reemplazo">Escanear</button></span></label>` : ''}
       ${motivos ? `<label>Motivo<select name="motivo" required>${motivos.map((m) => `<option ${m === datos.motivo ? 'selected' : ''}>${m}</option>`).join('')}</select></label>` : ''}
       ${tipo === 'movimiento' ? `<label>Nueva dirección<input name="direccion" placeholder="Calle y altura" required></label>` : ''}
       <label class="foto-btn"><span id="foto-vista">${datos.foto ? `<img src="${datos.foto}" alt="Foto tomada">Cambiar foto` : 'Tomar foto del contenedor'}</span>
@@ -179,7 +219,7 @@ function formulario(c, tipo, previo = {}) {
       `${f.toLocaleDateString('es-AR', { day: 'numeric', month: 'short', year: 'numeric' })} ${f.toLocaleTimeString('es-AR', { hour12: false })}`,
       lugar,
       datos.lat != null ? `GPS ${datos.lat.toFixed(5)}, ${datos.lng.toFixed(5)}${datos.precision != null ? ` (±${datos.precision} m)` : ''}` : 'Sin ubicación GPS',
-      `${c.nro_inventario} · ${c.tipo}`,
+      `Equipo ${c.nro_inventario} · ${c.tipo}`,
       `${GESTIONES[tipo]} · ${yo.email}`,
     ].filter(Boolean);
   };
