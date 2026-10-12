@@ -7,6 +7,7 @@ import QRCode from 'qrcode';
 import { OAuth2Client } from 'google-auth-library';
 import { db, tx, distanciaM, DEPOSITO, FOTOS_DIR, config, MOTIVOS_RECLAMO } from './db.js';
 import { enviarMail, cuerpoHtml, smtp } from './mail.js';
+import { PROVEEDORES, configLLM, configPublica, guardarConfig, listarModelos, preguntar } from './asistente.js';
 import { seedSiVacio } from './seed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -415,7 +416,7 @@ app.post('/api/reclamos/:id/resolver', auth('admin', 'operador'), async (req, re
 });
 
 // ---------- Ajustes del sistema ----------
-app.get('/api/ajustes', auth('admin'), (req, res) => res.json({ empresa_email: config.get('empresa_email') || '', smtp }));
+app.get('/api/ajustes', auth('admin'), (req, res) => res.json({ empresa_email: config.get('empresa_email') || '', smtp, llm: configPublica(), proveedores: PROVEEDORES }));
 app.post('/api/ajustes', auth('admin'), (req, res) => {
   const email = String(req.body.empresa_email || '').trim().toLowerCase();
   if (email && !emailValido(email)) return res.status(400).json({ error: 'Email inválido' });
@@ -427,6 +428,30 @@ app.post('/api/ajustes/probar-mail', auth('admin'), async (req, res) => {
     para: config.get('empresa_email'), asunto: 'Prueba de envío · Hassa Inventario',
     html: cuerpoHtml('Prueba de envío', [['Resultado', 'El envío de mails funciona correctamente.'], ['Pedido por', req.usuario.email]]),
   }));
+});
+
+// ---------- Asistente de IA ----------
+app.post('/api/ajustes/llm', auth('admin'), (req, res) => {
+  guardarConfig(req.body || {});
+  res.json(configPublica());
+});
+// Lista los modelos disponibles con la clave escrita (o la guardada, si se deja vacía)
+app.post('/api/ajustes/llm/modelos', auth('admin'), async (req, res) => {
+  const b = req.body || {}, actual = configLLM();
+  if (!PROVEEDORES[b.proveedor]) return res.status(400).json({ error: 'Elegí un proveedor' });
+  const c = { proveedor: b.proveedor, api_key: b.api_key || (actual.proveedor === b.proveedor ? actual.api_key : ''),
+    base: (b.base_url || PROVEEDORES[b.proveedor].base).replace(/\/+$/, '') };
+  if (!c.base) return res.status(400).json({ error: 'Indicá la URL base del servicio' });
+  if (!c.api_key && b.proveedor !== 'compatible') return res.status(400).json({ error: 'Ingresá la clave de API' });
+  try { res.json({ modelos: await listarModelos(c) }); } catch (e) { res.status(502).json({ error: e.message }); }
+});
+app.get('/api/asistente/estado', auth(), (req, res) => {
+  const c = configPublica();
+  res.json({ configurado: c.configurado, proveedor: PROVEEDORES[c.proveedor]?.nombre || null, modelo: c.modelo });
+});
+app.post('/api/asistente', auth(), async (req, res) => {
+  try { res.json(await preguntar(Array.isArray(req.body?.mensajes) ? req.body.mensajes : [])); }
+  catch (e) { res.status(e.status || 502).json({ error: e.message }); }
 });
 
 // ---------- Usuarios (administración de accesos) ----------

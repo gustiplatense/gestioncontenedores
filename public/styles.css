@@ -111,6 +111,28 @@ td.largo { white-space: normal; min-width: 140px; }
 .parada { width: 26px; height: 26px; border-radius: 50%; background: #1f6fd6; color: #fff; font-weight: 700; font-size: 12.5px; display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 1px 4px #0006; }
 .foto-recl { width: 100%; border-radius: 10px; margin-bottom: 8px; display: block; }
 
+.chat { max-width: 960px; margin: 0 auto; height: 100%; display: flex; flex-direction: column; padding: 14px 18px; gap: 10px; }
+.chat-cabecera { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.chat-mensajes { flex: 1; min-height: 0; overflow: auto; background: var(--sup); border: 1px solid var(--borde); border-radius: var(--radio); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.msg { flex: none; max-width: 85%; padding: 10px 14px; border-radius: 14px; line-height: 1.45; font-size: 14.5px; }
+.msg.usuario { align-self: flex-end; background: var(--verde); color: #fff; white-space: pre-wrap; border-bottom-right-radius: 4px; }
+.msg.asistente { align-self: flex-start; background: #f1f4f3; border-bottom-left-radius: 4px; overflow-x: auto; }
+.msg.asistente p { margin: 0 0 8px; } .msg.asistente p:last-child { margin-bottom: 0; }
+.msg.asistente h4 { margin: 8px 0 6px; font-size: 15px; }
+.msg.asistente ul, .msg.asistente ol { margin: 4px 0 8px; padding-left: 20px; }
+.msg.asistente .tabla-caja { margin: 6px 0 8px; }
+.msg.asistente td, .msg.asistente th { white-space: normal; }
+.msg.asistente details { margin-top: 8px; font-size: 13px; }
+.msg.asistente summary { cursor: pointer; color: var(--suave); }
+.msg pre { background: #fff; border: 1px solid var(--borde); border-radius: 8px; padding: 8px; white-space: pre-wrap; font-size: 12.5px; margin: 6px 0 2px; }
+.msg.con-error { background: #fdecea; color: var(--rojo); }
+.msg.pensando { color: var(--suave); font-style: italic; }
+.chat-vacio { margin: auto; text-align: center; display: grid; gap: 8px; justify-items: center; }
+.sugerencia { background: #fff; border: 1px solid var(--borde); border-radius: 99px; padding: 8px 14px; cursor: pointer; font-size: 14px; }
+.sugerencia:hover { border-color: var(--verde); color: var(--verde); }
+.chat-entrada { display: flex; gap: 8px; align-items: flex-end; }
+.chat-entrada textarea { flex: 1; resize: none; }
+
 @media (max-width: 800px) {
   .mapa-fila.reclamos { grid-template-columns: 1fr; }
   .mapa-fila { grid-template-columns: 1fr; }

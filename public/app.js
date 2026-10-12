@@ -7,7 +7,7 @@ const { tipos, barrios } = await api('/api/tipos');
 const tipoPorId = Object.fromEntries(tipos.map((t) => [t.id, t]));
 const puedeGestionar = yo.rol !== 'consulta';
 
-const VISTAS = { mapa: 'Mapa', inventario: 'Inventario', gestiones: 'Gestiones', reclamos: 'Reclamos', ...(yo.rol === 'admin' ? { usuarios: 'Usuarios', ajustes: 'Ajustes' } : {}) };
+const VISTAS = { mapa: 'Mapa', inventario: 'Inventario', gestiones: 'Gestiones', reclamos: 'Reclamos', asistente: 'Asistente', ...(yo.rol === 'admin' ? { usuarios: 'Usuarios', ajustes: 'Ajustes' } : {}) };
 const VACIO = { color: '#111827', nombre: 'Punto vacío' };
 const capas = { vacios: true, soloVacios: false, calor: false };
 let vista = 'mapa';
@@ -36,7 +36,7 @@ function ir(v) {
   vista = v; pagina = 0; ficha.hidden = true;
   document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('activo', b.dataset.vista === v));
   if (mapa) { mapa.remove(); mapa = null; }
-  ({ mapa: verMapa, inventario: verInventario, gestiones: verGestiones, reclamos: verReclamos, usuarios: verUsuarios, ajustes: verAjustes })[v]();
+  ({ mapa: verMapa, inventario: verInventario, gestiones: verGestiones, reclamos: verReclamos, asistente: verAsistente, usuarios: verUsuarios, ajustes: verAjustes })[v]();
 }
 const qs = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== '' && v != null)).toString();
 const opciones = (lista, sel, vacio) => `<option value="">${vacio}</option>` +
@@ -462,12 +462,51 @@ async function verAjustes() {
         <p class="suave" style="font-size:13px">La cuenta y su contraseña se cargan como variables del servicio (no en esta pantalla, por seguridad):
           <code>SMTP_HOST</code>, <code>SMTP_PORT</code>, <code>SMTP_USER</code>, <code>SMTP_PASS</code>. El README explica cómo hacerlo con una cuenta de Gmail.</p>
       </div>
+      <div class="panel" style="margin-top:14px">
+        <h3>Asistente de IA</h3>
+        <p class="suave" style="margin-top:0">El asistente responde preguntas sobre los datos usando el modelo de lenguaje de la cuenta que cargues acá. El consumo se factura en esa cuenta.</p>
+        <form class="filtros" id="f-llm">
+          <label>Proveedor<select name="proveedor">${Object.entries(a.proveedores).map(([k, v]) => `<option value="${k}" ${k === (a.llm.proveedor || 'anthropic') ? 'selected' : ''}>${esc(v.nombre)}</option>`).join('')}</select></label>
+          <label>Clave de API<input type="password" name="api_key" autocomplete="off" placeholder="${a.llm.clave_configurada ? `Guardada (termina en ${esc(a.llm.clave_fin)}). Dejar vacío para no cambiarla` : 'Pegá la clave de API de tu cuenta'}"></label>
+          <label id="l-base">URL base <span class="suave">(opcional; obligatoria para "Compatible con OpenAI")</span><input name="base_url" value="${esc(a.llm.base_url)}" placeholder=""></label>
+          <label>Modelo<span class="fila" style="display:flex;gap:8px"><input name="modelo" list="modelos" value="${esc(a.llm.modelo)}" required style="flex:1" placeholder="Elegí uno de la lista o escribilo"><button type="button" class="btn sec" id="cargar-modelos">Cargar modelos</button></span><datalist id="modelos"></datalist></label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn">Guardar</button><button type="button" class="btn sec" id="probar-llm">Probar con una pregunta</button></div>
+        </form>
+        <p id="llm-msg" style="margin:8px 0 0"></p>
+        ${a.llm.desde_entorno ? '<p class="suave" style="font-size:13px">Ahora se usa la configuración de las variables de entorno <code>LLM_*</code>. Lo que guardes acá tiene prioridad.</p>' : ''}
+        <p class="suave" style="font-size:13px">Lo que se guarda acá se pierde cuando Cloud Run publica una nueva revisión; para que sea permanente cargá también las variables <code>LLM_PROVEEDOR</code>, <code>LLM_API_KEY</code> y <code>LLM_MODELO</code>. Las preguntas y los datos consultados se envían al proveedor elegido.</p>
+      </div>
     </div>`;
   const msg = (ok, t) => { const m = $('#aj-msg'); m.className = ok ? 'suave' : 'error'; m.textContent = t; };
   $('#f-ajustes').onsubmit = async (e) => {
     e.preventDefault();
     try { await api('/api/ajustes', { body: { empresa_email: new FormData(e.target).get('empresa_email') } }); msg(true, 'Guardado.'); }
     catch (err) { msg(false, err.message); }
+  };
+  const fl = $('#f-llm'), lmsg = (ok, t) => { const m = $('#llm-msg'); m.className = ok ? 'suave' : 'error'; m.textContent = t; };
+  const ponerBase = () => { fl.base_url.placeholder = a.proveedores[fl.proveedor.value].base || 'https://…/v1'; };
+  ponerBase(); fl.proveedor.onchange = () => { ponerBase(); $('#modelos').innerHTML = ''; };
+  const datosLLM = () => Object.fromEntries(new FormData(fl));
+  $('#cargar-modelos').onclick = async () => {
+    lmsg(true, 'Consultando modelos…');
+    try {
+      const { modelos } = await api('/api/ajustes/llm/modelos', { body: datosLLM() });
+      $('#modelos').innerHTML = modelos.map((m) => `<option value="${esc(m)}">`).join('');
+      lmsg(true, `${modelos.length} modelos disponibles: hacé clic en el campo Modelo para elegir.`); fl.modelo.focus();
+    } catch (err) { lmsg(false, err.message); }
+  };
+  fl.onsubmit = async (e) => {
+    e.preventDefault();
+    try { const r = await api('/api/ajustes/llm', { body: datosLLM() }); fl.api_key.value = ''; lmsg(true, r.configurado ? 'Guardado. El asistente está listo.' : 'Guardado, pero falta completar datos (clave o modelo).'); }
+    catch (err) { lmsg(false, err.message); }
+  };
+  $('#probar-llm').onclick = async () => {
+    lmsg(true, 'Guardando y consultando al modelo…');
+    try {
+      await api('/api/ajustes/llm', { body: datosLLM() }); fl.api_key.value = '';
+      const r = await api('/api/asistente', { body: { mensajes: [{ rol: 'usuario', texto: '¿Cuántos equipos hay en el inventario? Respondé en una sola frase.' }] } });
+      const m = $('#llm-msg'); m.className = 'msg asistente'; m.style.maxWidth = '100%'; m.innerHTML = `<p><b>Funciona.</b> Respuesta del modelo:</p>${md(r.respuesta)}`;
+    } catch (err) { lmsg(false, err.message); }
   };
   $('#probar').onclick = async () => {
     msg(true, 'Enviando…');
@@ -477,6 +516,90 @@ async function verAjustes() {
       msg(r.ok, r.ok ? 'Mail de prueba enviado. Revisá la casilla.' : `No se pudo enviar: ${r.error}`);
     } catch (err) { msg(false, err.message); }
   };
+}
+
+// ---------------- Asistente de IA ----------------
+const chat = { mensajes: [], enviando: false };   // [{ rol, texto, consultas? }]
+const SUGERENCIAS = [
+  '¿Cuántos equipos hay por tipo y por barrio?',
+  '¿Qué reclamos siguen pendientes y desde cuándo?',
+  '¿Cuáles son los 10 equipos en la calle con más días sin lecturas?',
+  '¿Qué operario resolvió más reclamos y cuál es el tiempo promedio de resolución?',
+  '¿En qué calles hay más puntos vacíos?',
+];
+
+// Markdown mínimo para las respuestas: títulos, negrita, código, listas y tablas
+function md(texto) {
+  const lin = esc(texto).split('\n'), out = [];
+  const inline = (t) => t.replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  for (let i = 0; i < lin.length; i++) {
+    const l = lin[i];
+    if (/^```/.test(l)) { const b = []; while (++i < lin.length && !/^```/.test(lin[i])) b.push(lin[i]); out.push(`<pre>${b.join('\n')}</pre>`); continue; }
+    if (/^\s*\|/.test(l)) {
+      const filas = []; while (i < lin.length && /^\s*\|/.test(lin[i])) filas.push(lin[i++]); i--;
+      const celdas = (f) => f.trim().replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim()));
+      const cuerpo = filas.filter((f, k) => !(k === 1 && /^[\s|:-]+$/.test(f)));
+      out.push(`<div class="tabla-caja"><table><thead><tr>${celdas(cuerpo[0]).map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${
+        cuerpo.slice(1).map((f) => `<tr>${celdas(f).map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+      continue;
+    }
+    if (/^\s*([-*]|\d+\.)\s+/.test(l)) {
+      const ord = /^\s*\d+\./.test(l), items = [];
+      while (i < lin.length && /^\s*([-*]|\d+\.)\s+/.test(lin[i])) items.push(lin[i++].replace(/^\s*([-*]|\d+\.)\s+/, '')); i--;
+      out.push(`<${ord ? 'ol' : 'ul'}>${items.map((t) => `<li>${inline(t)}</li>`).join('')}</${ord ? 'ol' : 'ul'}>`); continue;
+    }
+    const h = /^(#{1,4})\s+(.*)/.exec(l);
+    if (h) { out.push(`<h4>${inline(h[2])}</h4>`); continue; }
+    out.push(l.trim() ? `<p>${inline(l)}</p>` : '');
+  }
+  return out.join('');
+}
+
+async function verAsistente() {
+  const estado = await api('/api/asistente/estado');
+  if (vista !== 'asistente') return;
+  main.innerHTML = `
+    <div class="chat">
+      <div class="chat-cabecera">
+        <div><b>Asistente de datos</b> <span class="suave">${estado.configurado ? `· ${esc(estado.proveedor)} · ${esc(estado.modelo)}` : ''}</span></div>
+        <button class="btn sec chico" id="nueva">Nueva conversación</button>
+      </div>
+      <div class="chat-mensajes" id="mensajes"></div>
+      <form class="chat-entrada" id="f-chat">
+        <textarea name="q" rows="2" placeholder="${estado.configurado ? 'Preguntá sobre los datos. Ej.: ¿cuántos reclamos se resolvieron esta semana?' : 'El asistente todavía no está configurado'}" ${estado.configurado ? '' : 'disabled'}></textarea>
+        <button class="btn" ${estado.configurado ? '' : 'disabled'}>Enviar</button>
+      </form>
+    </div>`;
+  const caja = $('#mensajes'), f = $('#f-chat');
+  const pintar = () => {
+    if (!estado.configurado) {
+      caja.innerHTML = `<div class="chat-vacio"><p>El asistente necesita un proveedor de IA.</p>${yo.rol === 'admin' ? '<button class="btn" id="ir-ajustes">Configurarlo en Ajustes</button>' : '<p class="suave">Pedile a un administrador que lo configure.</p>'}</div>`;
+      const b = $('#ir-ajustes'); if (b) b.onclick = () => ir('ajustes');
+      return;
+    }
+    caja.innerHTML = chat.mensajes.length ? chat.mensajes.map((m) => m.rol === 'usuario'
+      ? `<div class="msg usuario">${esc(m.texto)}</div>`
+      : `<div class="msg asistente ${m.error ? 'con-error' : ''}">${m.error ? esc(m.texto) : md(m.texto)}${m.consultas?.length ? `<details><summary>Consultas a la base (${m.consultas.length})</summary>${
+          m.consultas.map((c) => `<pre>${esc(c.sql)}</pre><div class="suave">${c.error ? esc(c.error) : `${c.filas} filas`}</div>`).join('')}</details>` : ''}</div>`).join('')
+      + (chat.enviando ? '<div class="msg asistente pensando">Consultando la base…</div>' : '')
+      : `<div class="chat-vacio"><p class="suave">Probá con alguna de estas preguntas:</p>${SUGERENCIAS.map((q) => `<button class="sugerencia" type="button">${esc(q)}</button>`).join('')}</div>`;
+    caja.scrollTop = caja.scrollHeight;
+  };
+  const enviar = async (texto) => {
+    if (!texto.trim() || chat.enviando) return;
+    chat.mensajes.push({ rol: 'usuario', texto: texto.trim() }); chat.enviando = true; f.q.value = ''; pintar();
+    try {
+      const r = await api('/api/asistente', { body: { mensajes: chat.mensajes.filter((m) => !m.error).map(({ rol, texto }) => ({ rol, texto })) } });
+      chat.mensajes.push({ rol: 'asistente', texto: r.respuesta || '(sin respuesta)', consultas: r.consultas });
+    } catch (err) { chat.mensajes.push({ rol: 'asistente', texto: err.message, error: true }); }
+    chat.enviando = false;
+    if (vista === 'asistente') { pintar(); f.q.focus(); }
+  };
+  caja.onclick = (e) => { const b = e.target.closest('.sugerencia'); if (b) enviar(b.textContent); };
+  f.onsubmit = (e) => { e.preventDefault(); enviar(f.q.value); };
+  f.q.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviar(f.q.value); } };
+  $('#nueva').onclick = () => { chat.mensajes = []; pintar(); };
+  pintar();
 }
 
 ir('mapa');

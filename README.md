@@ -7,6 +7,7 @@ Demo funcional en un solo servicio:
 | Backoffice | `/` | Administración: mapa, inventario, gestiones, reclamos, usuarios y ajustes |
 | App de campo | `/campo/` | Operarios: QR, foto, gestiones, relevamientos asignados y recorrido |
 | App del vecino | `/vecino/` | Vecinos y empresas: carga de reclamos, sin login |
+| Asistente de IA | pestaña **Asistente** del backoffice | Usuarios internos: preguntas sobre los datos en lenguaje natural |
 | API de lecturas | `/api/v1/lecturas` | Aplicaciones de terceros que reportan lecturas de tags |
 
 ## Datos
@@ -59,6 +60,16 @@ Con Gmail: activar la verificación en dos pasos de la cuenta y crear una "contr
 
 Se envía un mail a la empresa por cada reclamo nuevo (con las fotos adjuntas y respuesta dirigida al vecino), una confirmación al vecino, y un aviso de resolución a ambos. Sin SMTP configurado los reclamos se guardan igual y cada mail queda registrado como "No enviado" con el motivo.
 
+## Asistente de IA
+
+Chat dentro del backoffice que responde preguntas sobre los datos ("¿cuántos reclamos pendientes hay en San Telmo?"). El modelo de lenguaje arma consultas SQL, el sistema las ejecuta y el modelo redacta la respuesta; debajo de cada respuesta se pueden ver las consultas que hizo.
+
+- **Proveedores:** Anthropic (Claude), OpenAI, Google Gemini, o cualquier servicio compatible con la API de OpenAI (DeepSeek, Groq, Mistral, Ollama, etc., indicando su URL base).
+- **Configuración:** pestaña **Ajustes > Asistente de IA** (solo administradores): proveedor, clave de API de la cuenta del cliente y modelo ("Cargar modelos" trae la lista disponible para esa clave). El consumo se factura en esa cuenta.
+- **Configuración permanente en Cloud Run:** lo cargado en Ajustes se pierde con cada revisión nueva; para que quede fijo, cargar también `LLM_PROVEEDOR` (`anthropic`, `openai`, `gemini` o `compatible`), `LLM_API_KEY`, `LLM_MODELO` y, si hace falta, `LLM_BASE_URL`.
+- **Seguridad:** el asistente solo puede leer (conexión de solo lectura, una consulta SELECT por vez, máximo 200 filas) y no accede a sesiones, claves de integradores ni a la clave del LLM, que se guarda en un archivo aparte (`data/secretos.db`).
+- **Privacidad:** las preguntas y los datos que el asistente consulta (incluidos nombres y mails de vecinos de los reclamos) se envían al proveedor elegido.
+
 ## Recorrido óptimo
 
 Lo calcula el servicio público de rutas de OpenStreetMap (OSRM, `router.project-osrm.org`): ordena las paradas y devuelve el trazado por calles, partiendo de la posición GPS del operario. Es gratuito y sin garantía de disponibilidad; si no responde, el sistema ordena las paradas por distancia en línea recta y lo indica en pantalla. Para producción conviene un servidor OSRM propio.
@@ -104,4 +115,5 @@ Acepta lotes de hasta 5.000 lecturas, es idempotente y responde cuántas fueron 
 | Requiere conexión | Guardado sin señal y sincronización posterior |
 | OSRM público | Servidor de rutas propio |
 | Límite de reclamos por IP en memoria | Captcha y límite persistente |
+| Clave del LLM en archivo local | Secret Manager; límite de consumo por usuario |
 | 7.046 equipos (Comuna 1) | 150.000 equipos, 450.000 lecturas por día |
