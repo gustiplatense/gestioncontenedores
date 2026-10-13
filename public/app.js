@@ -526,7 +526,31 @@ const SUGERENCIAS = [
   '¿Cuáles son los 10 equipos en la calle con más días sin lecturas?',
   '¿Qué operario resolvió más reclamos y cuál es el tiempo promedio de resolución?',
   '¿En qué calles hay más puntos vacíos?',
+  'Armá un informe HTML con gráficos del estado del parque por tipo y por barrio',
+  'Generá un Excel con los reclamos pendientes y preparalo para enviarlo por mail',
 ];
+
+const PESO = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+const archivosHtml = (lista) => (lista || []).map((a) => `
+  <div class="archivo"><span class="fmt fmt-${esc(a.formato)}">${esc(a.formato.toUpperCase())}</span>
+    <span class="archivo-nombre">${esc(a.nombre)} <span class="suave">· ${PESO(a.bytes)}</span></span>
+    ${a.formato === 'html' ? `<a class="btn sec chico" href="${esc(a.url)}?ver=1" target="_blank" rel="noopener">Abrir</a>` : ''}
+    <a class="btn chico" href="${esc(a.url)}" download>Descargar</a></div>`).join('');
+function borradorHtml(b) {
+  const cab = `<div class="borrador-cab">Mail preparado${b.adjuntos.length ? ` · ${b.adjuntos.length} adjunto${b.adjuntos.length > 1 ? 's' : ''}` : ''}</div>`;
+  if (b.estado !== 'pendiente') {
+    return `<div class="borrador">${cab}<p><b>${esc(b.asunto)}</b><br><span class="suave">Para ${esc(b.para.join(', '))}</span></p>
+      ${b.estado === 'enviado' ? '<span class="chip" style="--c:#1a9d5f">Enviado</span>' : '<span class="chip" style="--c:#62716b">Descartado</span>'}</div>`;
+  }
+  return `<form class="borrador" data-borrador="${b.id}">${cab}
+    <label>Para<input name="para" value="${esc(b.para.join(', '))}" required></label>
+    <label>Asunto<input name="asunto" value="${esc(b.asunto)}" required></label>
+    <div class="borrador-cuerpo">${md(b.cuerpo)}</div>
+    ${b.adjuntos.map((a) => `<span class="chip" style="--c:#0f6b4a">${esc(a.nombre)}</span>`).join(' ')}
+    <div class="borrador-acciones"><button class="btn chico" ${b.enviando ? 'disabled' : ''}>${b.enviando ? 'Enviando…' : 'Enviar'}</button>
+      <button type="button" class="btn sec chico" data-descartar="${b.id}" ${b.enviando ? 'disabled' : ''}>Descartar</button>
+      <span class="error">${esc(b.error || '')}</span></div></form>`;
+}
 
 // Markdown mínimo para las respuestas: títulos, negrita, código, listas y tablas
 function md(texto) {
@@ -579,7 +603,7 @@ async function verAsistente() {
     }
     caja.innerHTML = chat.mensajes.length ? chat.mensajes.map((m) => m.rol === 'usuario'
       ? `<div class="msg usuario">${esc(m.texto)}</div>`
-      : `<div class="msg asistente ${m.error ? 'con-error' : ''}">${m.error ? esc(m.texto) : md(m.texto)}${m.consultas?.length ? `<details><summary>Consultas a la base (${m.consultas.length})</summary>${
+      : `<div class="msg asistente ${m.error ? 'con-error' : ''}">${m.error ? esc(m.texto) : md(m.texto)}${archivosHtml(m.archivos)}${(m.borradores || []).map(borradorHtml).join('')}${m.consultas?.length ? `<details><summary>Consultas a la base (${m.consultas.length})</summary>${
           m.consultas.map((c) => `<pre>${esc(c.sql)}</pre><div class="suave">${c.error ? esc(c.error) : `${c.filas} filas`}</div>`).join('')}</details>` : ''}</div>`).join('')
       + (chat.enviando ? '<div class="msg asistente pensando">Consultando la base…</div>' : '')
       : `<div class="chat-vacio"><p class="suave">Probá con alguna de estas preguntas:</p>${SUGERENCIAS.map((q) => `<button class="sugerencia" type="button">${esc(q)}</button>`).join('')}</div>`;
@@ -589,13 +613,37 @@ async function verAsistente() {
     if (!texto.trim() || chat.enviando) return;
     chat.mensajes.push({ rol: 'usuario', texto: texto.trim() }); chat.enviando = true; f.q.value = ''; pintar();
     try {
-      const r = await api('/api/asistente', { body: { mensajes: chat.mensajes.filter((m) => !m.error).map(({ rol, texto }) => ({ rol, texto })) } });
-      chat.mensajes.push({ rol: 'asistente', texto: r.respuesta || '(sin respuesta)', consultas: r.consultas });
+      // Se agregan los ids de archivos generados antes, para que el asistente pueda reutilizarlos (por ejemplo, para enviarlos por mail)
+      const historial = chat.mensajes.filter((m) => !m.error).map(({ rol, texto, archivos }) => ({ rol,
+        texto: texto + (archivos?.length ? `\n\n[Archivos generados: ${archivos.map((a) => `${a.nombre} (id ${a.id})`).join(', ')}]` : '') }));
+      const r = await api('/api/asistente', { body: { mensajes: historial } });
+      chat.mensajes.push({ rol: 'asistente', texto: r.respuesta || '(sin respuesta)', consultas: r.consultas, archivos: r.archivos, borradores: r.borradores });
     } catch (err) { chat.mensajes.push({ rol: 'asistente', texto: err.message, error: true }); }
     chat.enviando = false;
     if (vista === 'asistente') { pintar(); f.q.focus(); }
   };
-  caja.onclick = (e) => { const b = e.target.closest('.sugerencia'); if (b) enviar(b.textContent); };
+  caja.onclick = async (e) => {
+    const b = e.target.closest('.sugerencia'); if (b) return enviar(b.textContent);
+    const descartar = e.target.closest('[data-descartar]');
+    if (descartar) {
+      const bor = buscarBorrador(Number(descartar.dataset.descartar));
+      try { await api(`/api/asistente/borradores/${bor.id}/descartar`, { method: 'POST' }); bor.estado = 'descartado'; } catch (err) { bor.error = err.message; }
+      pintar();
+    }
+  };
+  caja.onsubmit = async (e) => {
+    const f = e.target.closest('form[data-borrador]'); if (!f) return;
+    e.preventDefault();
+    const bor = buscarBorrador(Number(f.dataset.borrador)), datos = new FormData(f);
+    bor.para = String(datos.get('para')).split(/[,;\s]+/).filter(Boolean); bor.asunto = datos.get('asunto');
+    bor.enviando = true; bor.error = ''; pintar();
+    try {
+      const r = await api(`/api/asistente/borradores/${bor.id}/enviar`, { body: { para: bor.para, asunto: bor.asunto } });
+      if (r.ok) bor.estado = 'enviado'; else bor.error = `No se pudo enviar: ${r.error}`;
+    } catch (err) { bor.error = err.message; }
+    bor.enviando = false; pintar();
+  };
+  const buscarBorrador = (id) => chat.mensajes.flatMap((m) => m.borradores || []).find((x) => x.id === id);
   f.onsubmit = (e) => { e.preventDefault(); enviar(f.q.value); };
   f.q.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviar(f.q.value); } };
   $('#nueva').onclick = () => { chat.mensajes = []; pintar(); };

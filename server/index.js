@@ -7,7 +7,8 @@ import QRCode from 'qrcode';
 import { OAuth2Client } from 'google-auth-library';
 import { db, tx, distanciaM, DEPOSITO, FOTOS_DIR, config, MOTIVOS_RECLAMO } from './db.js';
 import { enviarMail, cuerpoHtml, smtp } from './mail.js';
-import { PROVEEDORES, configLLM, configPublica, guardarConfig, listarModelos, preguntar } from './asistente.js';
+import { PROVEEDORES, configLLM, configPublica, guardarConfig, listarModelos, preguntar, enviarBorrador, descartarBorrador } from './asistente.js';
+import { archivoDe, limpiarArchivos, mime } from './archivos.js';
 import { seedSiVacio } from './seed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -18,6 +19,7 @@ const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').toLowerCase();
 const MODO_DEMO = !GOOGLE_CLIENT_ID;
 const HORAS_SIN_LECTURA = 48, DESVIO_MAX_M = 150, DIAS_PUNTO_VACIO = 7;
 
+limpiarArchivos();
 if (seedSiVacio()) console.log('Base de datos creada: inventario real + actividad simulada.');
 if (ADMIN_EMAIL) {
   db.prepare(`INSERT INTO usuarios (email,nombre,rol,activo) VALUES (?,?,'admin',1)
@@ -450,8 +452,29 @@ app.get('/api/asistente/estado', auth(), (req, res) => {
   res.json({ configurado: c.configurado, proveedor: PROVEEDORES[c.proveedor]?.nombre || null, modelo: c.modelo });
 });
 app.post('/api/asistente', auth(), async (req, res) => {
-  try { res.json(await preguntar(Array.isArray(req.body?.mensajes) ? req.body.mensajes : [])); }
+  try { res.json(await preguntar(Array.isArray(req.body?.mensajes) ? req.body.mensajes : [], req.usuario)); }
   catch (e) { res.status(e.status || 502).json({ error: e.message }); }
+});
+
+// Archivos generados por el asistente: los descarga su autor (o un administrador)
+app.get('/api/archivos/:id', auth(), (req, res) => {
+  const a = archivoDe(req.params.id, req.usuario);
+  if (!a || !fs.existsSync(a.ruta)) return res.status(404).json({ error: 'El archivo no existe o ya fue eliminado (se guardan 7 días)' });
+  res.type(mime(a.formato));
+  if (req.query.ver && a.formato === 'html') {
+    // Vista en el navegador, aislada del resto del sistema
+    res.setHeader('Content-Security-Policy', "sandbox allow-scripts; default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'");
+    res.setHeader('Content-Disposition', `inline; filename="${a.nombre}"`);
+  } else res.setHeader('Content-Disposition', `attachment; filename="${a.nombre}"`);
+  res.sendFile(a.ruta);
+});
+app.post('/api/asistente/borradores/:id/enviar', auth(), async (req, res) => {
+  try { res.json(await enviarBorrador(req.params.id, req.usuario, req.body || {}, enviarMail)); }
+  catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+app.post('/api/asistente/borradores/:id/descartar', auth(), (req, res) => {
+  try { descartarBorrador(req.params.id, req.usuario); res.json({ ok: true }); }
+  catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 
 // ---------- Usuarios (administración de accesos) ----------

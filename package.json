@@ -13,6 +13,7 @@
     "simular": "node scripts/simular-lecturas.js"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "google-auth-library": "^9.15.0",
     "html5-qrcode": "^2.3.8",
@@ -20,6 +21,7 @@
     "leaflet.heat": "^0.2.0",
     "leaflet.markercluster": "^1.5.3",
     "nodemailer": "^10.0.15",
+    "pdfmake": "^0.2.23",
     "qrcode": "^1.5.4"
   }
 }
